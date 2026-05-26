@@ -109,13 +109,14 @@ app.get("/api/invoices/:salesperson_id", async (req, res) => {
       }
       const c = customers[cid];
       c.invoices.push({
-        invoice_id:     inv.invoice_id,
-        invoice_number: inv.invoice_number,
-        date:           inv.date,
-        due_date:       inv.due_date,
-        total:          inv.total,
-        balance:        inv.balance,
-        status:         inv.status,
+        invoice_id:        inv.invoice_id,
+        invoice_number:    inv.invoice_number,
+        date:              inv.date,
+        due_date:          inv.due_date,
+        total:             inv.total,
+        balance:           inv.balance,
+        status:            inv.status,
+        last_payment_date: inv.last_payment_date || "",
       });
       c.total_invoiced      += inv.total || 0;
       c.outstanding_balance += inv.balance || 0;
@@ -136,12 +137,42 @@ app.get("/api/invoices/:salesperson_id", async (req, res) => {
   }
 });
 
-// Payment history for a customer (to compute avg days to pay)
+// Payment history — derived from invoices (avoids needing customerpayments scope)
 app.get("/api/payments/:customer_id", async (req, res) => {
   try {
     const { customer_id } = req.params;
-    const data = await zoho("/customerpayments", { customer_id });
-    res.json({ payments: data.payments || [] });
+    const invoices = await fetchAllPages("/invoices", "invoices", { customer_id });
+
+    const payments = invoices
+      .filter(inv => inv.total > inv.balance)
+      .map(inv => ({
+        invoice_id:     inv.invoice_id,
+        invoice_number: inv.invoice_number,
+        date:           inv.date,
+        due_date:       inv.due_date,
+        total:          inv.total,
+        amount_paid:    parseFloat((inv.total - inv.balance).toFixed(2)),
+        balance:        inv.balance,
+        status:         inv.status,
+      }));
+
+    const paid = invoices.filter(i => i.status === "paid");
+    const avgDays = paid.length > 0
+      ? Math.round(paid.reduce((s, i) => {
+          return s + Math.abs(Math.floor((new Date(i.due_date) - new Date(i.date)) / 86400000));
+        }, 0) / paid.length)
+      : null;
+
+    res.json({
+      payments,
+      summary: {
+        total_invoices:    invoices.length,
+        paid_invoices:     paid.length,
+        avg_days_to_pay:   avgDays,
+        total_paid:        parseFloat(invoices.reduce((s, i) => s + (i.total - i.balance), 0).toFixed(2)),
+        total_outstanding: parseFloat(invoices.reduce((s, i) => s + i.balance, 0).toFixed(2)),
+      }
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
