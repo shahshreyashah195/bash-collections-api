@@ -120,11 +120,16 @@ app.get("/api/invoices/:salesperson_id", async (req, res) => {
 app.get("/api/transactions/:customer_id", async (req, res) => {
   try {
     const { customer_id } = req.params;
-    const [invoices, creditNotes, payments] = await Promise.all([
+    const [invoices, creditNotes, payments, contactData] = await Promise.all([
       fetchAllPages("/invoices", "invoices", { customer_id }),
       fetchAllPages("/creditnotes", "creditnotes", { customer_id }),
       fetchAllPages("/customerpayments", "customerpayments", { customer_id }),
+      zoho(`/contacts/${customer_id}`).catch(() => ({})),
     ]);
+    const openingBalance = contactData?.contact?.opening_balance_amount || 0;
+    const customerName   = contactData?.contact?.contact_name || "";
+    const gstNo          = contactData?.contact?.gst_no || "";
+    const billingAddr    = contactData?.contact?.billing_address || {};
 
     const invItems = invoices.map(i => ({
       type: "invoice", id: i.invoice_id, number: i.invoice_number,
