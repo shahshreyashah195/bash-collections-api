@@ -154,10 +154,16 @@ app.get("/api/transactions/:customer_id", async (req, res) => {
     res.json({
       transactions: all,
       summary: {
-        total_invoiced: +totalInvoiced.toFixed(2),
-        total_paid: +totalPaid.toFixed(2),
-        total_cn: +totalCN.toFixed(2),
-        balance_due: +balanceDue.toFixed(2),
+        opening_balance: +openingBalance.toFixed(2),
+        total_invoiced:  +totalInvoiced.toFixed(2),
+        total_paid:      +totalPaid.toFixed(2),
+        total_cn:        +totalCN.toFixed(2),
+        balance_due:     +(openingBalance + totalInvoiced - totalPaid - totalCN).toFixed(2),
+      },
+      customer_detail: {
+        name:    customerName,
+        gst_no:  gstNo,
+        address: billingAddr,
       }
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -311,12 +317,11 @@ app.get("/api/admin/overview", async (req, res) => {
       .sort((a, b) => b.max_overdue_days - a.max_overdue_days)
       .slice(0, 10);
 
-    // Aging buckets
+    // Aging buckets — from invoice date (matches Zoho)
     const aging = { "0-30": 0, "30-60": 0, "60-90": 0, "90-120": 0, "120-150": 0, "150+": 0 };
     invoices.forEach(inv => {
-      if (inv.balance <= 0 || !inv.due_date) return;
-      const days = Math.floor((Date.now() - new Date(inv.due_date)) / 86400000);
-      if (days < 0) return;
+      if (inv.balance <= 0 || !inv.date) return;
+      const days = Math.floor((Date.now() - new Date(inv.date)) / 86400000);
       if (days < 30) aging["0-30"] += inv.balance;
       else if (days < 60) aging["30-60"] += inv.balance;
       else if (days < 90) aging["60-90"] += inv.balance;
