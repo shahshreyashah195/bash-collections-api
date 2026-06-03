@@ -76,7 +76,54 @@ async function fetchAllPages(path, key, extraParams = {}) {
 // ── ROUTES: Health ────────────────────────────────────────
 app.get("/health", (_, res) => res.json({ ok: true, db: mongoose.connection.readyState === 1 }));
 
-// ── ROUTES: Invoices + Payments (salesperson) ─────────────
+// ── TEMP DEBUG: list all salesperson IDs ─────────────────
+app.get("/api/debug/salespeople", async (req, res) => {
+  try {
+    const invoices = await fetchAllPages("/invoices", "invoices");
+    const map = {};
+    invoices.forEach(inv => {
+      if (!inv.salesperson_id || !inv.salesperson_name) return;
+      map[inv.salesperson_name] = inv.salesperson_id;
+    });
+    res.json(map);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── TEMP DEBUG: list June payments counted for a salesperson ──
+app.get("/api/debug/payments/:salesperson_id", async (req, res) => {
+  try {
+    const { salesperson_id } = req.params;
+    const { month = "2026-06" } = req.query;
+
+    const [invoices, payments] = await Promise.all([
+      fetchAllPages("/invoices", "invoices", { salesperson_id }),
+      fetchAllPages("/customerpayments", "customerpayments"),
+    ]);
+
+    const spCustomerIds = new Set();
+    const customerNames = {};
+    invoices.forEach(inv => {
+      spCustomerIds.add(inv.customer_id);
+      customerNames[inv.customer_id] = inv.customer_name;
+    });
+
+    const counted = payments
+      .filter(p => p.date && p.date.startsWith(month) && spCustomerIds.has(p.customer_id))
+      .map(p => ({
+        date: p.date,
+        customer: customerNames[p.customer_id] || p.customer_name,
+        customer_id: p.customer_id,
+        amount: p.amount,
+        reference: p.reference_number || p.payment_number || ""
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    const total = counted.reduce((s, p) => s + p.amount, 0);
+    res.json({ salesperson_id, month, total, count: counted.length, payments: counted });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
 app.get("/api/invoices/:salesperson_id", async (req, res) => {
   try {
     const { salesperson_id } = req.params;
