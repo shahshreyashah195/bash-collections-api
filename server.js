@@ -1,35 +1,33 @@
-const express  = require("express");
-const cors     = require("cors");
-const axios    = require("axios");
+const express = require("express");
+const cors = require("cors");
+const axios = require("axios");
 const mongoose = require("mongoose");
-
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 // ── Zoho credentials ──────────────────────────────────────
-const ZOHO_CLIENT_ID     = "1000.0O68U7O5KE0ZII98X11HS0XU1B4JPA";
+const ZOHO_CLIENT_ID = "1000.0O68U7O5KE0ZII98X11HS0XU1B4JPA";
 const ZOHO_CLIENT_SECRET = "d9439eef9ef7235ff17653536e2c7eca0dd4f5f8bd";
 const ZOHO_REFRESH_TOKEN = "1000.719ab5d5ba2243b659ff6edecdff9afd.7a73edb52fa415012b98ccc384a0c8a7";
-const ZOHO_ORG_ID        = "60067759868";
-const ZOHO_API_BASE      = "https://www.zohoapis.in/inventory/v1";
-const ZOHO_AUTH_URL      = "https://accounts.zoho.in/oauth/v2/token";
+const ZOHO_ORG_ID = "60067759868";
+const ZOHO_API_BASE = "https://www.zohoapis.in/inventory/v1";
+const ZOHO_AUTH_URL = "https://accounts.zoho.in/oauth/v2/token";
 
 // ── MongoDB ───────────────────────────────────────────────
 const MONGO_URI = "mongodb+srv://bashsales:zz44%40Shreya@cluster0.ayelkf0.mongodb.net/bashsales?retryWrites=true&w=majority&appName=Cluster0";
-
 mongoose.connect(MONGO_URI).then(() => console.log("MongoDB connected")).catch(e => console.error("MongoDB error:", e.message));
 
 // Reminder schema
 const reminderSchema = new mongoose.Schema({
-  salesperson_id:   String,
+  salesperson_id: String,
   salesperson_name: String,
-  customer_id:      String,
-  customer_name:    String,
-  date:             String,   // YYYY-MM-DD
-  kept:             { type: Boolean, default: false },
-  created_at:       { type: Date, default: Date.now },
-  updated_at:       { type: Date, default: Date.now },
+  customer_id: String,
+  customer_name: String,
+  date: String,
+  kept: { type: Boolean, default: false },
+  created_at: { type: Date, default: Date.now },
+  updated_at: { type: Date, default: Date.now },
 });
 reminderSchema.index({ salesperson_id: 1, customer_id: 1 });
 const Reminder = mongoose.model("Reminder", reminderSchema);
@@ -43,9 +41,9 @@ async function getAccessToken() {
   const res = await axios.post(ZOHO_AUTH_URL, null, {
     params: {
       refresh_token: ZOHO_REFRESH_TOKEN,
-      client_id:     ZOHO_CLIENT_ID,
+      client_id: ZOHO_CLIENT_ID,
       client_secret: ZOHO_CLIENT_SECRET,
-      grant_type:    "refresh_token",
+      grant_type: "refresh_token",
     },
   });
   cachedToken = res.data.access_token;
@@ -57,7 +55,7 @@ async function zoho(path, params = {}) {
   const token = await getAccessToken();
   const res = await axios.get(`${ZOHO_API_BASE}${path}`, {
     headers: { Authorization: `Zoho-oauthtoken ${token}` },
-    params:  { organization_id: ZOHO_ORG_ID, ...params },
+    params: { organization_id: ZOHO_ORG_ID, ...params },
   });
   return res.data;
 }
@@ -78,12 +76,18 @@ async function fetchAllPages(path, key, extraParams = {}) {
 // ── ROUTES: Health ────────────────────────────────────────
 app.get("/health", (_, res) => res.json({ ok: true, db: mongoose.connection.readyState === 1 }));
 
-// ── ROUTES: Invoices (salesperson) ────────────────────────
+// ── ROUTES: Invoices + Payments (salesperson) ─────────────
 app.get("/api/invoices/:salesperson_id", async (req, res) => {
   try {
     const { salesperson_id } = req.params;
-    const invoices = await fetchAllPages("/invoices", "invoices", { salesperson_id });
 
+    // Fetch invoices AND payments in parallel — one round trip
+    const [invoices, payments] = await Promise.all([
+      fetchAllPages("/invoices", "invoices", { salesperson_id }),
+      fetchAllPages("/customerpayments", "customerpayments", { salesperson_id }),
+    ]);
+
+    // ── Build customer map ──
     const customers = {};
     invoices.forEach(inv => {
       const cid = inv.customer_id;
@@ -111,8 +115,28 @@ app.get("/api/invoices/:salesperson_id", async (req, res) => {
       if (!c.last_invoice_date || inv.date > c.last_invoice_date) c.last_invoice_date = inv.date;
     });
 
+    // total_paid from actual payment records (not invoice arithmetic)
     Object.values(customers).forEach(c => { c.total_paid = c.total_invoiced - c.outstanding_balance; });
-    res.json({ customers: Object.values(customers), invoices });
+
+    // ── Build monthly summary ──
+    // Keyed by "YYYY-MM" → { invoiced, collected }
+    const monthly = {};
+
+    invoices.forEach(inv => {
+      if (!inv.date) return;
+      const month = inv.date.substring(0, 7);
+      if (!monthly[month]) monthly[month] = { invoiced: 0, collected: 0 };
+      monthly[month].invoiced += inv.total || 0;
+    });
+
+    payments.forEach(p => {
+      if (!p.date) return;
+      const month = p.date.substring(0, 7);
+      if (!monthly[month]) monthly[month] = { invoiced: 0, collected: 0 };
+      monthly[month].collected += p.amount || 0;
+    });
+
+    res.json({ customers: Object.values(customers), invoices, monthly });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -126,10 +150,11 @@ app.get("/api/transactions/:customer_id", async (req, res) => {
       fetchAllPages("/customerpayments", "customerpayments", { customer_id }),
       zoho(`/contacts/${customer_id}`).catch(() => ({})),
     ]);
+
     const openingBalance = contactData?.contact?.opening_balance_amount || 0;
-    const customerName   = contactData?.contact?.contact_name || "";
-    const gstNo          = contactData?.contact?.gst_no || "";
-    const billingAddr    = contactData?.contact?.billing_address || {};
+    const customerName = contactData?.contact?.contact_name || "";
+    const gstNo = contactData?.contact?.gst_no || "";
+    const billingAddr = contactData?.contact?.billing_address || {};
 
     const invItems = invoices.map(i => ({
       type: "invoice", id: i.invoice_id, number: i.invoice_number,
@@ -152,31 +177,24 @@ app.get("/api/transactions/:customer_id", async (req, res) => {
 
     const all = [...invItems, ...cnItems, ...payItems].sort((a, b) => new Date(b.date) - new Date(a.date));
     const totalInvoiced = invoices.reduce((s, i) => s + (i.total || 0), 0);
-    const totalPaid     = payments.reduce((s, p) => s + (p.amount || 0), 0);
-    const totalCN       = creditNotes.reduce((s, cn) => s + (cn.total || 0), 0);
-    const balanceDue    = invoices.reduce((s, i) => s + (i.balance || 0), 0);
+    const totalPaid = payments.reduce((s, p) => s + (p.amount || 0), 0);
+    const totalCN = creditNotes.reduce((s, cn) => s + (cn.total || 0), 0);
 
     res.json({
       transactions: all,
       summary: {
         opening_balance: +openingBalance.toFixed(2),
-        total_invoiced:  +totalInvoiced.toFixed(2),
-        total_paid:      +totalPaid.toFixed(2),
-        total_cn:        +totalCN.toFixed(2),
-        balance_due:     +(openingBalance + totalInvoiced - totalPaid - totalCN).toFixed(2),
+        total_invoiced: +totalInvoiced.toFixed(2),
+        total_paid: +totalPaid.toFixed(2),
+        total_cn: +totalCN.toFixed(2),
+        balance_due: +(openingBalance + totalInvoiced - totalPaid - totalCN).toFixed(2),
       },
-      customer_detail: {
-        name:    customerName,
-        gst_no:  gstNo,
-        address: billingAddr,
-      }
+      customer_detail: { name: customerName, gst_no: gstNo, address: billingAddr }
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── ROUTES: Reminders ─────────────────────────────────────
-
-// Get reminders for a salesperson
 app.get("/api/reminders/:salesperson_id", async (req, res) => {
   try {
     const reminders = await Reminder.find({ salesperson_id: req.params.salesperson_id });
@@ -184,7 +202,6 @@ app.get("/api/reminders/:salesperson_id", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Save or update a reminder
 app.post("/api/reminders", async (req, res) => {
   try {
     const { salesperson_id, salesperson_name, customer_id, customer_name, date, kept } = req.body;
@@ -204,7 +221,6 @@ app.post("/api/reminders", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Bulk sync — salesman sends all their local reminders
 app.post("/api/reminders/sync", async (req, res) => {
   try {
     const { salesperson_id, salesperson_name, reminders } = req.body;
@@ -212,7 +228,6 @@ app.post("/api/reminders/sync", async (req, res) => {
     for (const r of reminders) {
       const existing = await Reminder.findOne({ salesperson_id, customer_id: r.customer_id });
       if (existing) {
-        // Only update if local is newer
         if (new Date(r.updated_at || 0) >= new Date(existing.updated_at || 0)) {
           existing.date = r.date;
           existing.kept = r.kept;
@@ -238,13 +253,9 @@ app.post("/api/reminders/sync", async (req, res) => {
 });
 
 // ── ROUTES: Admin ─────────────────────────────────────────
-
-// All invoices across all salespeople (for admin dashboard)
 app.get("/api/admin/overview", async (req, res) => {
   try {
     const invoices = await fetchAllPages("/invoices", "invoices");
-
-    // Group by salesperson
     const salespeople = {};
     const allCustomers = {};
     const exclude = ["Office", "Wholesale"];
@@ -253,7 +264,6 @@ app.get("/api/admin/overview", async (req, res) => {
       const sp = inv.salesperson_name;
       if (!sp || exclude.includes(sp)) return;
       const sid = inv.salesperson_id;
-
       if (!salespeople[sid]) {
         salespeople[sid] = {
           id: sid, name: sp,
@@ -267,7 +277,6 @@ app.get("/api/admin/overview", async (req, res) => {
       s.invoice_count += 1;
       s.customer_ids.add(inv.customer_id);
 
-      // Track all customers
       const cid = inv.customer_id;
       if (!allCustomers[cid]) {
         allCustomers[cid] = {
@@ -286,22 +295,17 @@ app.get("/api/admin/overview", async (req, res) => {
       }
     });
 
-    // Convert Sets to counts
     Object.values(salespeople).forEach(s => {
       s.customer_count = s.customer_ids.size;
       s.paid = s.total_invoiced - s.outstanding;
       delete s.customer_ids;
     });
 
-    // Sort salespeople by outstanding desc
     const spList = Object.values(salespeople).sort((a, b) => b.outstanding - a.outstanding);
-
-    // Company totals
     const totalInvoiced = spList.reduce((s, sp) => s + sp.total_invoiced, 0);
     const totalOutstanding = spList.reduce((s, sp) => s + sp.outstanding, 0);
     const totalPaid = spList.reduce((s, sp) => s + sp.paid, 0);
 
-    // Avg days to pay
     let daysSum = 0, daysCt = 0;
     invoices.forEach(inv => {
       if (inv.status === "paid" && inv.date && inv.last_payment_date) {
@@ -311,7 +315,6 @@ app.get("/api/admin/overview", async (req, res) => {
     });
     const avgDays = daysCt > 0 ? Math.round(daysSum / daysCt) : 0;
 
-    // Top overdue customers
     const topOverdue = Object.values(allCustomers)
       .filter(c => c.outstanding > 0)
       .sort((a, b) => b.outstanding - a.outstanding)
@@ -322,17 +325,17 @@ app.get("/api/admin/overview", async (req, res) => {
       .sort((a, b) => b.max_overdue_days - a.max_overdue_days)
       .slice(0, 10);
 
-    // Aging buckets — from invoice date (matches Zoho)
+    // ── Aging buckets — fixed to <= boundaries ──
     const aging = { "0-30": 0, "30-60": 0, "60-90": 0, "90-120": 0, "120-150": 0, "150+": 0 };
     invoices.forEach(inv => {
       if (inv.balance <= 0 || !inv.date) return;
       const days = Math.floor((Date.now() - new Date(inv.date)) / 86400000);
-      if (days < 30) aging["0-30"] += inv.balance;
-      else if (days < 60) aging["30-60"] += inv.balance;
-      else if (days < 90) aging["60-90"] += inv.balance;
-      else if (days < 120) aging["90-120"] += inv.balance;
-      else if (days < 150) aging["120-150"] += inv.balance;
-      else aging["150+"] += inv.balance;
+      if (days <= 30)       aging["0-30"]    += inv.balance;
+      else if (days <= 60)  aging["30-60"]   += inv.balance;
+      else if (days <= 90)  aging["60-90"]   += inv.balance;
+      else if (days <= 120) aging["90-120"]  += inv.balance;
+      else if (days <= 150) aging["120-150"] += inv.balance;
+      else                  aging["150+"]    += inv.balance;
     });
 
     res.json({
@@ -345,7 +348,6 @@ app.get("/api/admin/overview", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// All reminders (for admin)
 app.get("/api/admin/reminders", async (req, res) => {
   try {
     const reminders = await Reminder.find({}).sort({ date: 1 });
@@ -353,6 +355,6 @@ app.get("/api/admin/reminders", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ──────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`Bash Sales API running on port ${PORT}`));
