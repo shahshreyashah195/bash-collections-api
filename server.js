@@ -122,6 +122,9 @@ app.get("/api/invoices/:salesperson_id", async (req, res) => {
     // Keyed by "YYYY-MM" → { invoiced, collected }
     const monthly = {};
 
+    // customer IDs belonging to this salesperson — used to filter payments
+    const spCustomerIds = new Set(Object.keys(customers));
+
     invoices.forEach(inv => {
       if (!inv.date) return;
       const month = inv.date.substring(0, 7);
@@ -130,7 +133,8 @@ app.get("/api/invoices/:salesperson_id", async (req, res) => {
     });
 
     payments.forEach(p => {
-      if (!p.date) return;
+      // Only count payments for customers who belong to this salesperson
+      if (!p.date || !spCustomerIds.has(p.customer_id)) return;
       const month = p.date.substring(0, 7);
       if (!monthly[month]) monthly[month] = { invoiced: 0, collected: 0 };
       monthly[month].collected += p.amount || 0;
