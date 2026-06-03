@@ -76,66 +76,8 @@ async function fetchAllPages(path, key, extraParams = {}) {
 // ── ROUTES: Health ────────────────────────────────────────
 app.get("/health", (_, res) => res.json({ ok: true, db: mongoose.connection.readyState === 1 }));
 
-// ── TEMP DEBUG: list all salesperson IDs ─────────────────
-app.get("/api/debug/salespeople", async (req, res) => {
-  try {
-    const invoices = await fetchAllPages("/invoices", "invoices");
-    const map = {};
-    invoices.forEach(inv => {
-      if (!inv.salesperson_id || !inv.salesperson_name) return;
-      map[inv.salesperson_name] = inv.salesperson_id;
-    });
-    res.json(map);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
 
-// ── TEMP DEBUG: list payments counted for a salesperson ──
-app.get("/api/debug/payments/:salesperson_id", async (req, res) => {
-  try {
-    const { salesperson_id } = req.params;
-    const { month = "2026-06" } = req.query;
-
-    const [invoices, payments] = await Promise.all([
-      fetchAllPages("/invoices", "invoices", { salesperson_id }),
-      fetchAllPages("/customerpayments", "customerpayments"),
-    ]);
-
-    const spInvoiceIds = new Set(invoices.map(inv => inv.invoice_id));
-    const customerNames = {};
-    invoices.forEach(inv => { customerNames[inv.customer_id] = inv.customer_name; });
-
-    const counted = [];
-    payments
-      .filter(p => p.date && p.date.startsWith(month))
-      .forEach(p => {
-        const appliedInvoices = p.invoices || [];
-        let amountForSP = 0;
-        if (appliedInvoices.length > 0) {
-          appliedInvoices.forEach(pi => {
-            if (spInvoiceIds.has(pi.invoice_id)) amountForSP += pi.amount_applied || 0;
-          });
-        }
-        if (amountForSP <= 0) return;
-        counted.push({
-          date: p.date,
-          customer: customerNames[p.customer_id] || p.customer_name,
-          amount_counted: amountForSP,
-          total_payment: p.amount,
-          reference: p.reference_number || p.payment_number || "",
-          invoices_matched: (p.invoices||[]).filter(pi => spInvoiceIds.has(pi.invoice_id))
-            .map(pi => ({ invoice_id: pi.invoice_id, amount_applied: pi.amount_applied }))
-        });
-      });
-
-    counted.sort((a, b) => a.date.localeCompare(b.date));
-    const total = counted.reduce((s, p) => s + p.amount_counted, 0);
-    res.json({ salesperson_id, month, total, count: counted.length, payments: counted });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-
-
-// ── ROUTES: Monthly stats (accurate payment collection) ───
+// ── ROUTES: Monthly stats (accurate payment collection) ───// ── ROUTES: Monthly stats (accurate payment collection) ───
 app.get("/api/monthly/:salesperson_id", async (req, res) => {
   try {
     const { salesperson_id } = req.params;
