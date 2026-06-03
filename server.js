@@ -89,7 +89,7 @@ app.get("/api/debug/salespeople", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── TEMP DEBUG: list June payments counted for a salesperson ──
+// ── TEMP DEBUG: list payments counted for a salesperson ──
 app.get("/api/debug/payments/:salesperson_id", async (req, res) => {
   try {
     const { salesperson_id } = req.params;
@@ -100,25 +100,35 @@ app.get("/api/debug/payments/:salesperson_id", async (req, res) => {
       fetchAllPages("/customerpayments", "customerpayments"),
     ]);
 
-    const spCustomerIds = new Set();
+    const spInvoiceIds = new Set(invoices.map(inv => inv.invoice_id));
     const customerNames = {};
-    invoices.forEach(inv => {
-      spCustomerIds.add(inv.customer_id);
-      customerNames[inv.customer_id] = inv.customer_name;
-    });
+    invoices.forEach(inv => { customerNames[inv.customer_id] = inv.customer_name; });
 
-    const counted = payments
-      .filter(p => p.date && p.date.startsWith(month) && spCustomerIds.has(p.customer_id))
-      .map(p => ({
-        date: p.date,
-        customer: customerNames[p.customer_id] || p.customer_name,
-        customer_id: p.customer_id,
-        amount: p.amount,
-        reference: p.reference_number || p.payment_number || ""
-      }))
-      .sort((a, b) => a.date.localeCompare(b.date));
+    const counted = [];
+    payments
+      .filter(p => p.date && p.date.startsWith(month))
+      .forEach(p => {
+        const appliedInvoices = p.invoices || [];
+        let amountForSP = 0;
+        if (appliedInvoices.length > 0) {
+          appliedInvoices.forEach(pi => {
+            if (spInvoiceIds.has(pi.invoice_id)) amountForSP += pi.amount_applied || 0;
+          });
+        }
+        if (amountForSP <= 0) return;
+        counted.push({
+          date: p.date,
+          customer: customerNames[p.customer_id] || p.customer_name,
+          amount_counted: amountForSP,
+          total_payment: p.amount,
+          reference: p.reference_number || p.payment_number || "",
+          invoices_matched: (p.invoices||[]).filter(pi => spInvoiceIds.has(pi.invoice_id))
+            .map(pi => ({ invoice_id: pi.invoice_id, amount_applied: pi.amount_applied }))
+        });
+      });
 
-    const total = counted.reduce((s, p) => s + p.amount, 0);
+    counted.sort((a, b) => a.date.localeCompare(b.date));
+    const total = counted.reduce((s, p) => s + p.amount_counted, 0);
     res.json({ salesperson_id, month, total, count: counted.length, payments: counted });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -169,8 +179,10 @@ app.get("/api/invoices/:salesperson_id", async (req, res) => {
     // Keyed by "YYYY-MM" → { invoiced, collected }
     const monthly = {};
 
-    // customer IDs belonging to this salesperson — used to filter payments
-    const spCustomerIds = new Set(Object.keys(customers));
+    // Build set of invoice IDs belonging to this salesperson
+    // This is more precise than customer-level matching — a customer can have
+    // invoices from multiple salespeople, so we match at the invoice level
+    const spInvoiceIds = new Set(invoices.map(inv => inv.invoice_id));
 
     invoices.forEach(inv => {
       if (!inv.date) return;
@@ -180,11 +192,25 @@ app.get("/api/invoices/:salesperson_id", async (req, res) => {
     });
 
     payments.forEach(p => {
-      // Only count payments for customers who belong to this salesperson
-      if (!p.date || !spCustomerIds.has(p.customer_id)) return;
+      if (!p.date) return;
+      // Sum only the portion of this payment applied to this salesperson's invoices
+      const appliedInvoices = p.invoices || [];
+      let amountForSP = 0;
+      if (appliedInvoices.length > 0) {
+        appliedInvoices.forEach(pi => {
+          if (spInvoiceIds.has(pi.invoice_id)) {
+            amountForSP += pi.amount_applied || 0;
+          }
+        });
+      } else {
+        // Fallback: if no invoice breakdown, use customer-level filter
+        const spCustomerIds = new Set(invoices.map(inv => inv.customer_id));
+        if (spCustomerIds.has(p.customer_id)) amountForSP = p.amount || 0;
+      }
+      if (amountForSP <= 0) return;
       const month = p.date.substring(0, 7);
       if (!monthly[month]) monthly[month] = { invoiced: 0, collected: 0 };
-      monthly[month].collected += p.amount || 0;
+      monthly[month].collected += amountForSP;
     });
 
     res.json({ customers: Object.values(customers), invoices, monthly });
