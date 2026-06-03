@@ -134,15 +134,62 @@ app.get("/api/debug/payments/:salesperson_id", async (req, res) => {
 });
 
 
+
+// ── ROUTES: Monthly stats (accurate payment collection) ───
+app.get("/api/monthly/:salesperson_id", async (req, res) => {
+  try {
+    const { salesperson_id } = req.params;
+    const now = new Date();
+    const month = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
+
+    // Fetch invoices + all payments in parallel
+    const [invoices, allPayments] = await Promise.all([
+      fetchAllPages("/invoices", "invoices", { salesperson_id }),
+      fetchAllPages("/customerpayments", "customerpayments"),
+    ]);
+
+    // Invoice ID set for cross-referencing
+    const spInvoiceIds = new Set(invoices.map(inv => inv.invoice_id));
+
+    // This month's invoiced amount
+    const monthlyInvoiced = invoices
+      .filter(inv => inv.date && inv.date.startsWith(month))
+      .reduce((s, inv) => s + (inv.total || 0), 0);
+
+    // Filter to this month's payments only before fetching details (~45-50 records)
+    const monthPayments = allPayments.filter(p => p.date && p.date.startsWith(month));
+
+    // Fetch full detail for each in parallel to get invoice breakdown
+    const details = await Promise.all(
+      monthPayments.map(p =>
+        zoho(`/customerpayments/${p.payment_id}`).catch(() => null)
+      )
+    );
+
+    // Sum only the portion applied to this salesperson's invoices
+    let monthlyCollected = 0;
+    details.forEach(data => {
+      if (!data) return;
+      const payment = data.customerpayment || data.payment || {};
+      const applied = payment.invoices || [];
+      applied.forEach(pi => {
+        if (spInvoiceIds.has(pi.invoice_id)) {
+          monthlyCollected += pi.amount_applied || 0;
+        }
+      });
+    });
+
+    res.json({ month, invoiced: monthlyInvoiced, collected: monthlyCollected });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── ROUTES: Invoices (salesperson) ────────────────────────
 app.get("/api/invoices/:salesperson_id", async (req, res) => {
   try {
     const { salesperson_id } = req.params;
 
-    // Fetch invoices AND payments in parallel — one round trip
-    const [invoices, payments] = await Promise.all([
-      fetchAllPages("/invoices", "invoices", { salesperson_id }),
-      fetchAllPages("/customerpayments", "customerpayments", { salesperson_id }),
-    ]);
+    // Fetch invoices only — monthly stats are handled by /api/monthly/:id
+    const invoices = await fetchAllPages("/invoices", "invoices", { salesperson_id });
 
     // ── Build customer map ──
     const customers = {};
@@ -172,48 +219,9 @@ app.get("/api/invoices/:salesperson_id", async (req, res) => {
       if (!c.last_invoice_date || inv.date > c.last_invoice_date) c.last_invoice_date = inv.date;
     });
 
-    // total_paid from actual payment records (not invoice arithmetic)
     Object.values(customers).forEach(c => { c.total_paid = c.total_invoiced - c.outstanding_balance; });
 
-    // ── Build monthly summary ──
-    // Keyed by "YYYY-MM" → { invoiced, collected }
-    const monthly = {};
-
-    // Build set of invoice IDs belonging to this salesperson
-    // This is more precise than customer-level matching — a customer can have
-    // invoices from multiple salespeople, so we match at the invoice level
-    const spInvoiceIds = new Set(invoices.map(inv => inv.invoice_id));
-
-    invoices.forEach(inv => {
-      if (!inv.date) return;
-      const month = inv.date.substring(0, 7);
-      if (!monthly[month]) monthly[month] = { invoiced: 0, collected: 0 };
-      monthly[month].invoiced += inv.total || 0;
-    });
-
-    payments.forEach(p => {
-      if (!p.date) return;
-      // Sum only the portion of this payment applied to this salesperson's invoices
-      const appliedInvoices = p.invoices || [];
-      let amountForSP = 0;
-      if (appliedInvoices.length > 0) {
-        appliedInvoices.forEach(pi => {
-          if (spInvoiceIds.has(pi.invoice_id)) {
-            amountForSP += pi.amount_applied || 0;
-          }
-        });
-      } else {
-        // Fallback: if no invoice breakdown, use customer-level filter
-        const spCustomerIds = new Set(invoices.map(inv => inv.customer_id));
-        if (spCustomerIds.has(p.customer_id)) amountForSP = p.amount || 0;
-      }
-      if (amountForSP <= 0) return;
-      const month = p.date.substring(0, 7);
-      if (!monthly[month]) monthly[month] = { invoiced: 0, collected: 0 };
-      monthly[month].collected += amountForSP;
-    });
-
-    res.json({ customers: Object.values(customers), invoices, monthly });
+    res.json({ customers: Object.values(customers), invoices });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
