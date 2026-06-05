@@ -84,21 +84,29 @@ app.get("/api/monthly/:salesperson_id", async (req, res) => {
     const now = new Date();
     const month = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
 
-    // Fetch invoices + all payments in parallel
-    const [invoices, allPayments] = await Promise.all([
-      fetchAllPages("/invoices", "invoices", { salesperson_id }),
-      fetchAllPages("/customerpayments", "customerpayments"),
-    ]);
+    // Fetch invoices for this salesperson
+    const invoices = await fetchAllPages("/invoices", "invoices", { salesperson_id });
 
-    // Invoice ID set for cross-referencing
+    // Build invoice ID set and get unique customer IDs
     const spInvoiceIds = new Set(invoices.map(inv => inv.invoice_id));
+    const customerIds = [...new Set(invoices.map(inv => inv.customer_id))];
 
-    // This month's invoiced amount
+    // This month's invoiced
     const monthlyInvoiced = invoices
       .filter(inv => inv.date && inv.date.startsWith(month))
       .reduce((s, inv) => s + (inv.total || 0), 0);
 
-    // Filter to this month's payments only before fetching details (~45-50 records)
+    // Fetch payments per customer in parallel — much faster than fetching
+    // all company payments, and scoped to only this salesperson's customers
+    const paymentArrays = await Promise.all(
+      customerIds.map(cid =>
+        fetchAllPages("/customerpayments", "customerpayments", { customer_id: cid })
+          .catch(() => [])
+      )
+    );
+    const allPayments = paymentArrays.flat();
+
+    // Filter to current month only before fetching details
     const monthPayments = allPayments.filter(p => p.date && p.date.startsWith(month));
 
     // Fetch full detail for each in parallel to get invoice breakdown
