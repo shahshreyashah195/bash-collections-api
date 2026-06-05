@@ -84,36 +84,36 @@ app.get("/api/monthly/:salesperson_id", async (req, res) => {
     const now = new Date();
     const month = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
 
-    // Fetch invoices for this salesperson
-    const invoices = await fetchAllPages("/invoices", "invoices", { salesperson_id });
+    // Fetch invoices + all payments in parallel
+    const [invoices, allPayments] = await Promise.all([
+      fetchAllPages("/invoices", "invoices", { salesperson_id }),
+      fetchAllPages("/customerpayments", "customerpayments"),
+    ]);
 
-    // Build invoice ID set and get unique customer IDs
+    // Invoice ID set for cross-referencing
     const spInvoiceIds = new Set(invoices.map(inv => inv.invoice_id));
-    const customerIds = [...new Set(invoices.map(inv => inv.customer_id))];
 
     // This month's invoiced
     const monthlyInvoiced = invoices
       .filter(inv => inv.date && inv.date.startsWith(month))
       .reduce((s, inv) => s + (inv.total || 0), 0);
 
-    // Fetch payments per customer in parallel — much faster than fetching
-    // all company payments, and scoped to only this salesperson's customers
-    const paymentArrays = await Promise.all(
-      customerIds.map(cid =>
-        fetchAllPages("/customerpayments", "customerpayments", { customer_id: cid })
-          .catch(() => [])
-      )
-    );
-    const allPayments = paymentArrays.flat();
-
-    // Filter to current month only before fetching details
+    // Filter to current month only
     const monthPayments = allPayments.filter(p => p.date && p.date.startsWith(month));
 
-    // Fetch full detail for each in parallel to get invoice breakdown
+    // Fetch full detail with retry — prevents silent drops from Zoho rate limits
+    async function zohoWithRetry(path, retries = 2) {
+      for (let i = 0; i <= retries; i++) {
+        try { return await zoho(path); }
+        catch(e) {
+          if (i === retries) return null;
+          await new Promise(r => setTimeout(r, 400 * (i + 1)));
+        }
+      }
+    }
+
     const details = await Promise.all(
-      monthPayments.map(p =>
-        zoho(`/customerpayments/${p.payment_id}`).catch(() => null)
-      )
+      monthPayments.map(p => zohoWithRetry(`/customerpayments/${p.payment_id}`))
     );
 
     // Sum only the portion applied to this salesperson's invoices
