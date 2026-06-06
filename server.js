@@ -25,6 +25,7 @@ const reminderSchema = new mongoose.Schema({
   customer_id: String,
   customer_name: String,
   date: String,
+  remarks: { type: String, default: "" },
   kept: { type: Boolean, default: false },
   created_at: { type: Date, default: Date.now },
   updated_at: { type: Date, default: Date.now },
@@ -239,17 +240,18 @@ app.get("/api/reminders/:salesperson_id", async (req, res) => {
 
 app.post("/api/reminders", async (req, res) => {
   try {
-    const { salesperson_id, salesperson_name, customer_id, customer_name, date, kept } = req.body;
+    const { salesperson_id, salesperson_name, customer_id, customer_name, date, kept, remarks } = req.body;
     const existing = await Reminder.findOne({ salesperson_id, customer_id });
     if (existing) {
       existing.date = date;
       existing.kept = kept || false;
+      existing.remarks = remarks || "";
       existing.customer_name = customer_name || existing.customer_name;
       existing.updated_at = new Date();
       await existing.save();
       res.json({ reminder: existing, updated: true });
     } else {
-      const reminder = new Reminder({ salesperson_id, salesperson_name, customer_id, customer_name, date, kept: kept || false });
+      const reminder = new Reminder({ salesperson_id, salesperson_name, customer_id, customer_name, date, remarks: remarks || "", kept: kept || false });
       await reminder.save();
       res.json({ reminder, updated: false });
     }
@@ -266,6 +268,7 @@ app.post("/api/reminders/sync", async (req, res) => {
         if (new Date(r.updated_at || 0) >= new Date(existing.updated_at || 0)) {
           existing.date = r.date;
           existing.kept = r.kept;
+          existing.remarks = r.remarks || "";
           existing.customer_name = r.customer_name || existing.customer_name;
           existing.updated_at = new Date();
           await existing.save();
@@ -277,7 +280,7 @@ app.post("/api/reminders/sync", async (req, res) => {
         const newR = new Reminder({
           salesperson_id, salesperson_name,
           customer_id: r.customer_id, customer_name: r.customer_name,
-          date: r.date, kept: r.kept,
+          date: r.date, kept: r.kept, remarks: r.remarks || "",
         });
         await newR.save();
         results.push(newR);
