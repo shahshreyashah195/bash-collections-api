@@ -91,12 +91,14 @@ app.get("/api/monthly/:salesperson_id", async (req, res) => {
       fetchAllPages("/customerpayments", "customerpayments"),
     ]);
 
-    // Invoice ID set for cross-referencing
-    const spInvoiceIds = new Set(invoices.map(inv => inv.invoice_id));
+    // Invoice ID set for cross-referencing — exclude void invoices
+    const spInvoiceIds = new Set(
+      invoices.filter(inv => inv.status !== "void").map(inv => inv.invoice_id)
+    );
 
-    // This month's invoiced
+    // This month's invoiced — exclude void
     const monthlyInvoiced = invoices
-      .filter(inv => inv.date && inv.date.startsWith(month))
+      .filter(inv => inv.status !== "void" && inv.date && inv.date.startsWith(month))
       .reduce((s, inv) => s + (inv.total || 0), 0);
 
     // Filter to current month only
@@ -145,6 +147,7 @@ app.get("/api/invoices/:salesperson_id", async (req, res) => {
     // ── Build customer map ──
     const customers = {};
     invoices.forEach(inv => {
+      if(inv.status === "void") return; // skip void invoices
       const cid = inv.customer_id;
       if (!customers[cid]) {
         customers[cid] = {
@@ -192,13 +195,17 @@ app.get("/api/transactions/:customer_id", async (req, res) => {
     const gstNo = contactData?.contact?.gst_no || "";
     const billingAddr = contactData?.contact?.billing_address || {};
 
-    const invItems = invoices.map(i => ({
+    const invItems = invoices
+      .filter(i => i.status !== "void")
+      .map(i => ({
       type: "invoice", id: i.invoice_id, number: i.invoice_number,
       date: i.date, due_date: i.due_date, details: i.reference_number || "",
       amount: i.total, payments: 0, refund: 0, balance: i.balance,
       status: i.status, last_payment_date: i.last_payment_date || "",
     }));
-    const cnItems = creditNotes.map(cn => ({
+    const cnItems = creditNotes
+      .filter(cn => cn.status !== "void")
+      .map(cn => ({
       type: "creditnote", id: cn.creditnote_id, number: cn.creditnote_number,
       date: cn.date, due_date: "", details: cn.reference_number || "",
       amount: 0, payments: 0, refund: cn.total, balance: 0,
@@ -299,6 +306,7 @@ app.get("/api/admin/overview", async (req, res) => {
     const exclude = ["Office", "Wholesale"];
 
     invoices.forEach(inv => {
+      if(inv.status === "void") return; // skip void invoices
       const sp = inv.salesperson_name;
       if (!sp || exclude.includes(sp)) return;
       const sid = inv.salesperson_id;
@@ -366,7 +374,7 @@ app.get("/api/admin/overview", async (req, res) => {
     // ── Aging buckets — fixed to <= boundaries ──
     const aging = { "0-30": 0, "30-60": 0, "60-90": 0, "90-120": 0, "120-150": 0, "150+": 0 };
     invoices.forEach(inv => {
-      if (inv.balance <= 0 || !inv.date) return;
+      if (inv.balance <= 0 || !inv.date || inv.status === "void") return;
       const days = Math.floor((Date.now() - new Date(inv.date)) / 86400000);
       if (days <= 30)       aging["0-30"]    += inv.balance;
       else if (days <= 60)  aging["30-60"]   += inv.balance;
