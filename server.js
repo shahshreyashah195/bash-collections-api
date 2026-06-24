@@ -61,24 +61,10 @@ async function zoho(path, params = {}) {
   return res.data;
 }
 
-// Retry on 429 (rate limit) with exponential backoff
-async function zohoWithRetry(path, params = {}, retries = 3) {
-  for (let i = 0; i <= retries; i++) {
-    try {
-      return await zoho(path, params);
-    } catch(e) {
-      const is429 = e?.response?.status === 429 || e?.message?.includes("429");
-      if (!is429 || i === retries) throw e;
-      // Exponential backoff: 2s, 4s, 8s — gives Zoho rate limit time to reset
-      await new Promise(r => setTimeout(r, 2000 * Math.pow(2, i)));
-    }
-  }
-}
-
 async function fetchAllPages(path, key, extraParams = {}) {
   let page = 1, all = [], hasMore = true;
   while (hasMore) {
-    const data = await zohoWithRetry(path, { page, per_page: 200, ...extraParams });
+    const data = await zoho(path, { page, per_page: 200, ...extraParams });
     const items = data[key] || [];
     all = all.concat(items);
     hasMore = data.page_context?.has_more_page === true;
@@ -118,9 +104,9 @@ app.get("/api/monthly/:salesperson_id", async (req, res) => {
     // Filter to current month only
     const monthPayments = allPayments.filter(p => p.date && p.date.startsWith(month));
 
-    // Fetch full detail with retry — now uses global zohoWithRetry
+    // Fetch full detail for each to get invoice breakdown
     const details = await Promise.all(
-      monthPayments.map(p => zohoWithRetry(`/customerpayments/${p.payment_id}`).catch(() => null))
+      monthPayments.map(p => zoho(`/customerpayments/${p.payment_id}`).catch(() => null))
     );
 
     // Sum only the portion applied to this salesperson's invoices
@@ -187,11 +173,12 @@ app.get("/api/invoices/:salesperson_id", async (req, res) => {
 app.get("/api/transactions/:customer_id", async (req, res) => {
   try {
     const { customer_id } = req.params;
-    // Sequential fetches to avoid bursting Zoho's rate limit
-    const invoices     = await fetchAllPages("/invoices", "invoices", { customer_id });
-    const creditNotes  = await fetchAllPages("/creditnotes", "creditnotes", { customer_id });
-    const payments     = await fetchAllPages("/customerpayments", "customerpayments", { customer_id });
-    const contactData  = await zohoWithRetry(`/contacts/${customer_id}`).catch(() => ({}));
+    const [invoices, creditNotes, payments, contactData] = await Promise.all([
+      fetchAllPages("/invoices", "invoices", { customer_id }),
+      fetchAllPages("/creditnotes", "creditnotes", { customer_id }),
+      fetchAllPages("/customerpayments", "customerpayments", { customer_id }),
+      zoho(`/contacts/${customer_id}`).catch(() => ({})),
+    ]);
 
     const openingBalance = contactData?.contact?.opening_balance_amount || 0;
     const customerName = contactData?.contact?.contact_name || "";
