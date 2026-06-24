@@ -61,7 +61,7 @@ async function zoho(path, params = {}) {
   return res.data;
 }
 
-// Retry on 429 (rate limit) — waits 400ms, 800ms, 1200ms before giving up
+// Retry on 429 (rate limit) with exponential backoff
 async function zohoWithRetry(path, params = {}, retries = 3) {
   for (let i = 0; i <= retries; i++) {
     try {
@@ -69,7 +69,8 @@ async function zohoWithRetry(path, params = {}, retries = 3) {
     } catch(e) {
       const is429 = e?.response?.status === 429 || e?.message?.includes("429");
       if (!is429 || i === retries) throw e;
-      await new Promise(r => setTimeout(r, 400 * (i + 1)));
+      // Exponential backoff: 2s, 4s, 8s — gives Zoho rate limit time to reset
+      await new Promise(r => setTimeout(r, 2000 * Math.pow(2, i)));
     }
   }
 }
@@ -186,12 +187,11 @@ app.get("/api/invoices/:salesperson_id", async (req, res) => {
 app.get("/api/transactions/:customer_id", async (req, res) => {
   try {
     const { customer_id } = req.params;
-    const [invoices, creditNotes, payments, contactData] = await Promise.all([
-      fetchAllPages("/invoices", "invoices", { customer_id }),
-      fetchAllPages("/creditnotes", "creditnotes", { customer_id }),
-      fetchAllPages("/customerpayments", "customerpayments", { customer_id }),
-      zohoWithRetry(`/contacts/${customer_id}`).catch(() => ({})),
-    ]);
+    // Sequential fetches to avoid bursting Zoho's rate limit
+    const invoices     = await fetchAllPages("/invoices", "invoices", { customer_id });
+    const creditNotes  = await fetchAllPages("/creditnotes", "creditnotes", { customer_id });
+    const payments     = await fetchAllPages("/customerpayments", "customerpayments", { customer_id });
+    const contactData  = await zohoWithRetry(`/contacts/${customer_id}`).catch(() => ({}));
 
     const openingBalance = contactData?.contact?.opening_balance_amount || 0;
     const customerName = contactData?.contact?.contact_name || "";
