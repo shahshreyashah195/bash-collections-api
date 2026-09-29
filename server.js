@@ -78,7 +78,20 @@ async function fetchAllPages(path, key, extraParams = {}) {
 app.get("/health", (_, res) => res.json({ ok: true, db: mongoose.connection.readyState === 1 }));
 
 
-// ── ROUTES: Monthly stats (accurate payment collection) ───// ── ROUTES: Monthly stats (accurate payment collection) ───
+// ── TEMP DEBUG: list all salesperson IDs (remove after use) ──
+app.get("/api/debug/salespeople", async (req, res) => {
+  try {
+    const invoices = await fetchAllPages("/invoices", "invoices");
+    const map = {};
+    invoices.forEach(inv => {
+      if (!inv.salesperson_id || !inv.salesperson_name) return;
+      map[inv.salesperson_name] = inv.salesperson_id;
+    });
+    res.json(map);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── ROUTES: Monthly stats (accurate payment collection) ───
 app.get("/api/monthly/:salesperson_id", async (req, res) => {
   try {
     const { salesperson_id } = req.params;
